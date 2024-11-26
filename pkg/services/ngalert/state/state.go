@@ -68,7 +68,7 @@ type State struct {
 	// and states that have been resolved. It cannot be used to determine when a state was resolved.
 	EndsAt time.Time
 	// ResolvedAt is set when the state is first resolved. That is to say, when the state first transitions
-	// from Alerting, NoData, or Error to Normal. It is reset to zero when the state transitions from Normal
+	// from Alerting, NoData, Recovering, or Error to Normal. It is reset to zero when the state transitions from Normal
 	// to any other state.
 	ResolvedAt           *time.Time
 	LastSentAt           *time.Time
@@ -164,6 +164,15 @@ func (a *State) SetAlerting(reason string, startsAt, endsAt time.Time) {
 // SetPending the state to Pending. It changes both the start and end time.
 func (a *State) SetPending(reason string, startsAt, endsAt time.Time) {
 	a.State = eval.Pending
+	a.StateReason = reason
+	a.StartsAt = startsAt
+	a.EndsAt = endsAt
+	a.Error = nil
+}
+
+// SetRecovering sets the state to Recovering. It changes both the start and end time.
+func (a *State) SetRecovering(reason string, startsAt, endsAt time.Time) {
+	a.State = eval.Recovering
 	a.StateReason = reason
 	a.StartsAt = startsAt
 	a.EndsAt = endsAt
@@ -319,22 +328,56 @@ func NewEvaluationValues(m map[string]eval.NumberValueCapture) map[string]float6
 	return result
 }
 
-func resultNormal(state *State, _ *models.AlertRule, result eval.Result, logger log.Logger, reason string) {
-	if state.State == eval.Normal {
+func resultNormal(state *State, rule *models.AlertRule, result eval.Result, logger log.Logger, reason string) {
+	switch state.State {
+	case eval.Normal:
 		logger.Debug("Keeping state", "state", state.State)
-	} else {
-		nextEndsAt := result.EvaluatedAt
-		logger.Debug("Changing state",
-			"previous_state",
-			state.State,
-			"next_state",
-			eval.Normal,
-			"previous_ends_at",
-			state.EndsAt,
-			"next_ends_at",
-			nextEndsAt)
-		// Normal states have the same start and end timestamps
-		state.SetNormal(reason, nextEndsAt, nextEndsAt)
+	case eval.Recovering:
+		// If the previous state is Recovering then check if the KeepFiringFor duration has been observed
+		if result.EvaluatedAt.Sub(state.StartsAt) >= rule.KeepFiringFor {
+			nextEndsAt := result.EvaluatedAt
+			logger.Debug("Changing state",
+				"previous_state",
+				state.State,
+				"next_state",
+				eval.Alerting,
+				"previous_ends_at",
+				state.EndsAt,
+				"next_ends_at",
+				nextEndsAt,
+			)
+			state.SetNormal(reason, nextEndsAt, nextEndsAt)
+		}
+	default:
+		if rule.KeepFiringFor > 0 {
+			// If the alert rule has a KeepFiringFor duration that should be observed then the state should be set to Pending
+			nextEndsAt := nextEndsTime(rule.IntervalSeconds, result.EvaluatedAt)
+			logger.Debug("Changing state",
+				"previous_state",
+				state.State,
+				"next_state",
+				eval.Recovering,
+				"previous_ends_at",
+				state.EndsAt,
+				"next_ends_at",
+				nextEndsAt,
+			)
+			state.SetRecovering(reason, result.EvaluatedAt, nextEndsAt)
+		} else {
+			nextEndsAt := result.EvaluatedAt
+			logger.Debug("Changing state",
+				"previous_state",
+				state.State,
+				"next_state",
+				eval.Normal,
+				"previous_ends_at",
+				state.EndsAt,
+				"next_ends_at",
+				nextEndsAt,
+			)
+			// Normal states have the same start and end timestamps
+			state.SetNormal(reason, nextEndsAt, nextEndsAt)
+		}
 	}
 }
 
@@ -789,8 +832,9 @@ func (a *State) transition(alertRule *models.AlertRule, result eval.Result, extr
 	case eval.NoData:
 		logger.Debug("Setting next state", "handler", "resultNoData")
 		resultNoData(a, alertRule, result, logger)
-	case eval.Pending: // we do not emit results with this state
-		logger.Debug("Ignoring set next state as result is pending")
+	case eval.Pending,
+		eval.Recovering: // we do not emit results with these states
+		logger.Debug("Ignoring set next state", "state", result.State)
 	}
 
 	// Set reason iff: result and state are different, reason is not Alerting or Normal
@@ -805,7 +849,7 @@ func (a *State) transition(alertRule *models.AlertRule, result eval.Result, extr
 	// Set Resolved property so the scheduler knows to send a postable alert
 	// to Alertmanager.
 	newlyResolved := false
-	if oldState == eval.Alerting && a.State == eval.Normal {
+	if oldState == eval.Alerting && a.State == eval.Normal || oldState == eval.Recovering && a.State == eval.Normal {
 		a.ResolvedAt = &result.EvaluatedAt
 		newlyResolved = true
 	} else if a.State != eval.Normal && a.State != eval.Pending { // Retain the last resolved time for Normal->Normal and Normal->Pending.
