@@ -96,9 +96,9 @@ func RegisterAPIService(
 		search:                       NewSearchHandler(tracing, cfg, legacyDashboardSearcher),
 
 		legacy: &DashboardStorage{
-			Resource:       dashboardv0alpha1.DashboardResourceInfo,
+			Resource:       dashboardinternal.DashboardResourceInfo,
 			Access:         legacy.NewDashboardAccess(dbp, namespacer, dashStore, provisioning, softDelete),
-			TableConverter: dashboardv0alpha1.DashboardResourceInfo.TableConverter(),
+			TableConverter: dashboardinternal.DashboardResourceInfo.TableConverter(),
 			Features:       features,
 		},
 		reg: reg,
