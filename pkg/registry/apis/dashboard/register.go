@@ -16,6 +16,7 @@ import (
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/kube-openapi/pkg/common"
 	"k8s.io/kube-openapi/pkg/spec3"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	claims "github.com/grafana/authlib/types"
 	"github.com/grafana/grafana/pkg/apimachinery/utils"
@@ -29,6 +30,7 @@ import (
 	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/infra/tracing"
 	"github.com/grafana/grafana/pkg/registry/apis/dashboard/legacy"
+	"github.com/grafana/grafana/pkg/registry/apis/dashboard/legacysearcher"
 	"github.com/grafana/grafana/pkg/services/accesscontrol"
 	"github.com/grafana/grafana/pkg/services/apiserver/builder"
 	"github.com/grafana/grafana/pkg/services/apiserver/endpoints/request"
@@ -43,8 +45,10 @@ import (
 )
 
 var (
-	_ builder.APIGroupBuilder      = (*DashboardsAPIBuilder)(nil)
-	_ builder.OpenAPIPostProcessor = (*DashboardsAPIBuilder)(nil)
+	_ builder.APIGroupBuilder          = (*DashboardsAPIBuilder)(nil)
+	_ builder.APIGroupVersionsProvider = (*DashboardsAPIBuilder)(nil)
+	_ builder.OpenAPIPostProcessor     = (*DashboardsAPIBuilder)(nil)
+	_ builder.APIGroupRouteProvider    = (*DashboardsAPIBuilder)(nil)
 )
 
 // This is used just so wire has something unique to return
@@ -57,12 +61,15 @@ type DashboardsAPIBuilder struct {
 	unified                      resource.ResourceClient
 	dashboardProvisioningService dashboards.DashboardProvisioningService
 	scheme                       *runtime.Scheme
+	search                       *SearchHandler
 
 	log log.Logger
 	reg prometheus.Registerer
 }
 
-func RegisterAPIService(cfg *setting.Cfg, features featuremgmt.FeatureToggles,
+func RegisterAPIService(
+	cfg *setting.Cfg,
+	features featuremgmt.FeatureToggles,
 	apiregistration builder.APIRegistrar,
 	dashboardService dashboards.DashboardService,
 	provisioningDashboardService dashboards.DashboardProvisioningService,
@@ -77,6 +84,7 @@ func RegisterAPIService(cfg *setting.Cfg, features featuremgmt.FeatureToggles,
 	softDelete := features.IsEnabledGlobally(featuremgmt.FlagDashboardRestore)
 	dbp := legacysql.NewDatabaseProvider(sql)
 	namespacer := request.GetNamespaceMapper(cfg)
+	legacyDashboardSearcher := legacysearcher.NewDashboardSearchClient(dashStore)
 	builder := &DashboardsAPIBuilder{
 		log: log.New("grafana-apiserver.dashboards"),
 
@@ -85,6 +93,7 @@ func RegisterAPIService(cfg *setting.Cfg, features featuremgmt.FeatureToggles,
 		accessControl:                accessControl,
 		unified:                      unified,
 		dashboardProvisioningService: provisioningDashboardService,
+		search:                       NewSearchHandler(tracing, cfg, legacyDashboardSearcher),
 
 		legacy: &DashboardStorage{
 			Resource:       dashboardv0alpha1.DashboardResourceInfo,
@@ -323,6 +332,11 @@ func (b *DashboardsAPIBuilder) PostProcessOpenAPI(oas *spec3.OpenAPI) (*spec3.Op
 	}
 
 	return oas, nil
+}
+
+func (b *DashboardsAPIBuilder) GetAPIRoutes() *builder.APIRoutes {
+	defs := b.GetOpenAPIDefinitions()(func(path string) spec.Ref { return spec.Ref{} })
+	return b.search.GetAPIRoutes(defs)
 }
 
 var _ genericregistry.RESTOptionsGetter = &dashboardOptsGetter{}
