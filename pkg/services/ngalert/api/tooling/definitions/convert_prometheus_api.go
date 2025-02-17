@@ -9,7 +9,7 @@ import (
 // Gets all namespaces with their rule groups in Prometheus format.
 //
 //     Produces:
-//     - application/json
+//     - application/yaml
 //
 //     Responses:
 //       200: PrometheusNamespace
@@ -33,7 +33,7 @@ import (
 // Gets a rule group in Prometheus format.
 //
 //     Produces:
-//     - application/json
+//     - application/yaml
 //
 //     Responses:
 //       200: PrometheusRuleGroup

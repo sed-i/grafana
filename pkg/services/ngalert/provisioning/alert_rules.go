@@ -262,12 +262,39 @@ func (service *AlertRuleService) CreateAlertRule(ctx context.Context, user ident
 	return rule, nil
 }
 
+type FilterOptions struct {
+	ImportedPrometheusRule *bool
+	RuleGroups             []string
+	NamespaceUIDs          []string
+}
+
+func (opts *FilterOptions) apply(q models.ListAlertRulesQuery) models.ListAlertRulesQuery {
+	if opts == nil {
+		return q
+	}
+
+	if opts.ImportedPrometheusRule != nil {
+		q.ImportedPrometheusRule = opts.ImportedPrometheusRule
+	}
+
+	if len(opts.NamespaceUIDs) > 0 {
+		q.NamespaceUIDs = opts.NamespaceUIDs
+	}
+
+	if len(opts.RuleGroups) > 0 {
+		q.RuleGroups = opts.RuleGroups
+	}
+
+	return q
+}
+
 func (service *AlertRuleService) GetRuleGroup(ctx context.Context, user identity.Requester, namespaceUID, group string) (models.AlertRuleGroup, error) {
 	q := models.ListAlertRulesQuery{
 		OrgID:         user.GetOrgID(),
 		NamespaceUIDs: []string{namespaceUID},
 		RuleGroups:    []string{group},
 	}
+
 	ruleList, err := service.ruleStore.ListAlertRules(ctx, &q)
 	if err != nil {
 		return models.AlertRuleGroup{}, err
@@ -748,15 +775,12 @@ func (service *AlertRuleService) GetAlertRuleGroupWithFolderFullpath(ctx context
 	return res, nil
 }
 
-// GetAlertGroupsWithFolderFullpath returns all groups with folder's full path in the folders identified by folderUID that have at least one alert. If argument folderUIDs is nil or empty - returns groups in all folders.
-func (service *AlertRuleService) GetAlertGroupsWithFolderFullpath(ctx context.Context, user identity.Requester, folderUIDs []string) ([]models.AlertRuleGroupWithFolderFullpath, error) {
+// GetAlertGroupsWithFolderFullpath returns all groups with folder's full path in the folders identified by folderUID that have at least one alert and supports optional filtering with FilterOptions.
+func (service *AlertRuleService) GetAlertGroupsWithFolderFullpath(ctx context.Context, user identity.Requester, filterOpts *FilterOptions) ([]models.AlertRuleGroupWithFolderFullpath, error) {
 	q := models.ListAlertRulesQuery{
 		OrgID: user.GetOrgID(),
 	}
-
-	if len(folderUIDs) > 0 {
-		q.NamespaceUIDs = folderUIDs
-	}
+	q = filterOpts.apply(q)
 
 	ruleList, err := service.ruleStore.ListAlertRules(ctx, &q)
 	if err != nil {
