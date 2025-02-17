@@ -4770,7 +4770,6 @@
    "type": "object"
   },
   "alertGroups": {
-   "description": "AlertGroups alert groups",
    "items": {
     "$ref": "#/definitions/alertGroup",
     "type": "object"
@@ -5056,7 +5055,6 @@
    "type": "object"
   },
   "gettableSilences": {
-   "description": "GettableSilences gettable silences",
    "items": {
     "$ref": "#/definitions/gettableSilence",
     "type": "object"
@@ -6403,7 +6401,7 @@
    "get": {
     "operationId": "RouteConvertPrometheusGetRules",
     "produces": [
-     "application/json"
+     "application/yaml"
     ],
     "responses": {
      "200": {
@@ -6425,7 +6423,7 @@
       }
      }
     },
-    "summary": "Gets all namespaces with their rule groups in Prometheus format.",
+    "summary": "Gets all Grafana-managed alert rules that were imported from Prometheus-compatible sources, grouped by namespace.",
     "tags": [
      "convert_prometheus"
     ]
@@ -6459,7 +6457,7 @@
       }
      }
     },
-    "summary": "Deletes all rule groups in the given namespace.",
+    "summary": "Deletes all rule groups that were imported from Prometheus-compatible sources within the specified namespace.",
     "tags": [
      "convert_prometheus"
     ]
@@ -6475,7 +6473,7 @@
      }
     ],
     "produces": [
-     "application/json"
+     "application/yaml"
     ],
     "responses": {
      "200": {
@@ -6497,7 +6495,7 @@
       }
      }
     },
-    "summary": "Gets rules in prometheus format for a given namespace.",
+    "summary": "Gets Grafana-managed alert rules that were imported from Prometheus-compatible sources for a specified namespace (folder).",
     "tags": [
      "convert_prometheus"
     ]
@@ -6506,6 +6504,7 @@
     "consumes": [
      "application/yaml"
     ],
+    "description": "If the group already exists and was not imported from a Prometheus-compatible source initially,\nit will not be replaced and an error will be returned.",
     "operationId": "RouteConvertPrometheusPostRuleGroup",
     "parameters": [
      {
@@ -6554,7 +6553,7 @@
       }
      }
     },
-    "summary": "Creates or updates a rule group in Prometheus format.",
+    "summary": "Converts a Prometheus rule group into a Grafana rule group and creates or updates it within the specified namespace.",
     "tags": [
      "convert_prometheus"
     ],
@@ -6595,7 +6594,7 @@
       }
      }
     },
-    "summary": "Deletes a rule group in Prometheus format.",
+    "summary": "Deletes a specific rule group if it was imported from a Prometheus-compatible source.",
     "tags": [
      "convert_prometheus"
     ]
@@ -6617,7 +6616,7 @@
      }
     ],
     "produces": [
-     "application/json"
+     "application/yaml"
     ],
     "responses": {
      "200": {
@@ -6639,7 +6638,7 @@
       }
      }
     },
-    "summary": "Gets a rule group in Prometheus format.",
+    "summary": "Gets a single rule group in Prometheus-compatible format if it was imported from a Prometheus-compatible source.",
     "tags": [
      "convert_prometheus"
     ]

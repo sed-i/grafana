@@ -1,14 +1,20 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	prommodel "github.com/prometheus/common/model"
+	"gopkg.in/yaml.v3"
 
 	"github.com/grafana/grafana/pkg/api/response"
 	"github.com/grafana/grafana/pkg/infra/log"
 	contextmodel "github.com/grafana/grafana/pkg/services/contexthandler/model"
+	"github.com/grafana/grafana/pkg/services/dashboards"
 	"github.com/grafana/grafana/pkg/services/datasources"
 	"github.com/grafana/grafana/pkg/services/folder"
 	apimodels "github.com/grafana/grafana/pkg/services/ngalert/api/tooling/definitions"
@@ -16,6 +22,7 @@ import (
 	"github.com/grafana/grafana/pkg/services/ngalert/prom"
 	"github.com/grafana/grafana/pkg/services/ngalert/provisioning"
 	"github.com/grafana/grafana/pkg/setting"
+	"github.com/grafana/grafana/pkg/util"
 )
 
 const (
@@ -24,6 +31,18 @@ const (
 	alertRulesPausedHeader     = "X-Grafana-Alerting-Alert-Rules-Paused"
 )
 
+// ConvertPrometheusSrv converts Prometheus rules to Grafana rules
+// and retrieves them in a Prometheus-compatible format.
+//
+// It is designed to support mimirtool integration, so that rules that work with Mimir
+// can be imported into Grafana. It works similarly to the provisioning API,
+// where once a rule group is created, it is marked as "provisioned" (via provenance mechanism)
+// and is not editable in the UI.
+//
+// This service returns only rule groups that were initially imported from Prometheus-compatible sources.
+// Rule groups not imported from Prometheus are excluded because their original rule definitions are unavailable.
+// When a rule group is converted from Prometheus to Grafana, the original definition is preserved alongside
+// the Grafana rule and used for reading requests here.
 type ConvertPrometheusSrv struct {
 	cfg              *setting.UnifiedAlertingSettings
 	logger           log.Logger
@@ -42,27 +61,116 @@ func NewConvertPrometheusSrv(cfg *setting.UnifiedAlertingSettings, logger log.Lo
 	}
 }
 
+// RouteConvertPrometheusGetRules returns all Grafana-managed alert rules in all namespaces (folders)
+// that were imported from a Prometheus-compatible source.
+// It responds with a YAML containing a mapping of folders to arrays of Prometheus rule groups.
 func (srv *ConvertPrometheusSrv) RouteConvertPrometheusGetRules(c *contextmodel.ReqContext) response.Response {
-	return response.Error(501, "Not implemented", nil)
+	filterOpts := &provisioning.FilterOptions{
+		ImportedPrometheusRule: util.Pointer(true),
+	}
+	groups, err := srv.alertRuleService.GetAlertGroupsWithFolderFullpath(c.Req.Context(), c.SignedInUser, filterOpts)
+	if err != nil {
+		return errorToResponse(err)
+	}
+
+	namespaces, err := grafanaNamespacesToPrometheus(groups)
+	if err != nil {
+		return errorToResponse(err)
+	}
+
+	return response.YAML(http.StatusOK, namespaces)
 }
 
+// RouteConvertPrometheusDeleteNamespace deletes all rule groups that were imported from a Prometheus-compatible source
+// within a specified namespace.
 func (srv *ConvertPrometheusSrv) RouteConvertPrometheusDeleteNamespace(c *contextmodel.ReqContext, namespaceTitle string) response.Response {
 	return response.Error(501, "Not implemented", nil)
 }
 
+// RouteConvertPrometheusDeleteRuleGroup deletes a specific rule group if it was imported from a Prometheus-compatible source.
 func (srv *ConvertPrometheusSrv) RouteConvertPrometheusDeleteRuleGroup(c *contextmodel.ReqContext, namespaceTitle string, group string) response.Response {
 	return response.Error(501, "Not implemented", nil)
 }
 
+// RouteConvertPrometheusGetNamespace returns the Grafana-managed alert rules for a specified namespace (folder).
+// It responds with a YAML containing a mapping of a single folder to an array of Prometheus rule groups.
 func (srv *ConvertPrometheusSrv) RouteConvertPrometheusGetNamespace(c *contextmodel.ReqContext, namespaceTitle string) response.Response {
-	return response.Error(501, "Not implemented", nil)
+	logger := srv.logger.FromContext(c.Req.Context())
+
+	logger.Debug("Looking up folder in the root by title", "folder_title", namespaceTitle)
+	namespace, err := srv.ruleStore.GetNamespaceInRootByTitle(c.Req.Context(), namespaceTitle, c.SignedInUser.GetOrgID(), c.SignedInUser)
+	if err != nil {
+		return toNamespaceErrorResponse(err)
+	}
+	if errors.Is(err, dashboards.ErrFolderAccessDenied) {
+		// If there is no folder, GetNamespaceByUID returns ErrFolderAccessDenied.
+		// We should return 404 in this case, otherwise mimirtool does not work correctly.
+		return response.Empty(http.StatusNotFound)
+	}
+
+	filterOpts := &provisioning.FilterOptions{
+		ImportedPrometheusRule: util.Pointer(true),
+		NamespaceUIDs:          []string{namespace.UID},
+	}
+	groups, err := srv.alertRuleService.GetAlertGroupsWithFolderFullpath(c.Req.Context(), c.SignedInUser, filterOpts)
+	if err != nil {
+		return errorToResponse(err)
+	}
+
+	ns, err := grafanaNamespacesToPrometheus(groups)
+	if err != nil {
+		return errorToResponse(err)
+	}
+
+	return response.YAML(http.StatusOK, ns)
 }
 
+// RouteConvertPrometheusGetRuleGroup retrieves a single rule group for a given namespace (folder)
+// in Prometheus-compatible YAML format if it was imported from a Prometheus-compatible source.
 func (srv *ConvertPrometheusSrv) RouteConvertPrometheusGetRuleGroup(c *contextmodel.ReqContext, namespaceTitle string, group string) response.Response {
-	// Just to make the mimirtool rules load work. It first checks if the group exists, and if the endpoint returns 501 it fails.
-	return response.YAML(http.StatusOK, apimodels.PrometheusRuleGroup{})
+	logger := srv.logger.FromContext(c.Req.Context())
+
+	logger.Debug("Looking up folder in the root by title", "folder_title", namespaceTitle)
+	namespace, err := srv.ruleStore.GetNamespaceInRootByTitle(c.Req.Context(), namespaceTitle, c.SignedInUser.GetOrgID(), c.SignedInUser)
+	if err != nil {
+		return toNamespaceErrorResponse(err)
+	}
+	if errors.Is(err, dashboards.ErrFolderAccessDenied) {
+		// If there is no such folder, GetNamespaceByUID returns ErrFolderAccessDenied.
+		// We should return 404 in this case, otherwise mimirtool does not work correctly.
+		return response.Empty(http.StatusNotFound)
+	}
+
+	filterOpts := &provisioning.FilterOptions{
+		ImportedPrometheusRule: util.Pointer(true),
+		NamespaceUIDs:          []string{namespace.UID},
+		RuleGroups:             []string{group},
+	}
+	groupsWithFolders, err := srv.alertRuleService.GetAlertGroupsWithFolderFullpath(c.Req.Context(), c.SignedInUser, filterOpts)
+	if err != nil {
+		return errorToResponse(err)
+	}
+	if len(groupsWithFolders) == 0 {
+		return response.Error(http.StatusNotFound, "Rule group not found", nil)
+	}
+	if len(groupsWithFolders) > 1 {
+		// It shouldn't happen, but if we get more than 1 group, we return an error.
+		return response.Error(http.StatusInternalServerError, "Multiple rule groups found", nil)
+	}
+
+	promGroup, err := grafanaRuleGroupToPrometheus(groupsWithFolders[0].Title, groupsWithFolders[0].Rules)
+	if err != nil {
+		return errorToResponse(err)
+	}
+
+	return response.YAML(http.StatusOK, promGroup)
 }
 
+// RouteConvertPrometheusPostRuleGroup converts a Prometheus rule group into a Grafana rule group
+// and creates or updates it within the specified namespace (folder).
+//
+// If the group already exists and was not imported from a Prometheus-compatible source initially,
+// it will not be replaced and an error will be returned.
 func (srv *ConvertPrometheusSrv) RouteConvertPrometheusPostRuleGroup(c *contextmodel.ReqContext, namespaceTitle string, promGroup apimodels.PrometheusRuleGroup) response.Response {
 	logger := srv.logger.FromContext(c.Req.Context())
 
@@ -183,4 +291,41 @@ func parseBooleanHeader(header string, headerName string) (bool, error) {
 		return false, fmt.Errorf("%w: invalid value for header %s: must be 'true' or 'false'", errInvalidHeaderValue, headerName)
 	}
 	return val, nil
+}
+
+func grafanaNamespacesToPrometheus(groups []models.AlertRuleGroupWithFolderFullpath) (map[string][]apimodels.PrometheusRuleGroup, error) {
+	result := map[string][]apimodels.PrometheusRuleGroup{}
+
+	for _, group := range groups {
+		promGroup, err := grafanaRuleGroupToPrometheus(group.Title, group.Rules)
+		if err != nil {
+			return nil, err
+		}
+		result[group.FolderFullpath] = append(result[group.FolderFullpath], promGroup)
+	}
+
+	return result, nil
+}
+
+func grafanaRuleGroupToPrometheus(group string, rules []models.AlertRule) (apimodels.PrometheusRuleGroup, error) {
+	if len(rules) == 0 {
+		return apimodels.PrometheusRuleGroup{}, nil
+	}
+
+	interval := time.Duration(rules[0].IntervalSeconds) * time.Second
+	promGroup := apimodels.PrometheusRuleGroup{
+		Name:     group,
+		Interval: prommodel.Duration(interval),
+		Rules:    make([]apimodels.PrometheusRule, len(rules)),
+	}
+
+	for i, rule := range rules {
+		var r apimodels.PrometheusRule
+		if err := yaml.Unmarshal([]byte(rule.Metadata.PrometheusStyleRule.OriginalRuleDefinition), &r); err != nil {
+			return apimodels.PrometheusRuleGroup{}, fmt.Errorf("failed to get the Prometheus definition of the rule with UID %s", rule.UID)
+		}
+		promGroup.Rules[i] = r
+	}
+
+	return promGroup, nil
 }
